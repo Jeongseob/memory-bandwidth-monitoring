@@ -11,6 +11,7 @@
 #include <linux/ktime.h> 
 
 #define TIMER_INTERVAL	1000000000	// 1s
+#define DDR3_1600_MAX_BANDWIDTH	12800*1024*1024	// B/s
 
 struct pcpu_shared_resources_info {
 	
@@ -21,6 +22,11 @@ struct pcpu_shared_resources_info {
 	int cache_limit;
 
 	struct perf_event* perf_l3c_miss_event;
+	int l3c_miss_sample_period; 
+	u64 credit;
+	u64 available_credit;
+
+	bool throttled;
 };
 
 struct archmon_info {
@@ -28,6 +34,8 @@ struct archmon_info {
 	struct pcpu_shared_resources_info* __percpu pcpu_resources_info;
 	struct hrtimer period_timer;
 	ktime_t	period;
+
+	int total_credit;
 };
 
 static struct archmon_info g_archmon_info;
@@ -37,6 +45,26 @@ static struct archmon_info g_archmon_info;
  */
 static void perf_l3c_miss_overflow(struct perf_event* event, struct perf_sample_data* data, struct pt_regs* regs)
 {
+	struct pcpu_shared_resources_info* resource_info = this_cpu_ptr(g_archmon_info.pcpu_resources_info);
+	u64 used_credit = local64_read(&event->count);
+
+	if ( used_credit < resource_info->available_credit ) {
+		// Error
+		return;
+	}
+	
+	/* End up its credit! */
+	resource_info->available_credit = 0;
+	
+	/* need to throttle process running on the cpu */
+	if ( resource_info->throttled == true ) {
+		// Error
+		printk("[%d] Error the processor is still throttled!\n", smp_processor_id());
+		return;
+	}
+	resource_info->throttled = true;
+	printk("[%d] need to be throttled \n", smp_processor_id());
+
 }
 
 /*
@@ -82,7 +110,33 @@ static void stop_counter(struct perf_event* event)
  */
 static void do_archmon_period_timer(void)
 {
+	int cpu_id = 0;
 	printk("[%d]Timer invoked!\n", smp_processor_id());
+
+	for_each_online_cpu(cpu_id) {
+		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
+		struct perf_event* event = resource_info->perf_l3c_miss_event;
+		
+		/* Stop the perf event */
+		event->pmu->stop(event, PERF_EF_UPDATE);
+
+		/* Reset the credit */
+		resource_info->available_credit = resource_info->credit;
+
+		/* If there are throttled threads, then need to unlock */
+		if ( resource_info->throttled ) {
+			printk("[%d] need to be unthrottled \n", cpu_id);
+			resource_info->throttled = false;
+		}
+	
+		/* 
+		 * Reconfiguring the period to reflect new credit on the sampling period 
+		 * and restart the perf event
+		 */
+		local64_set(&event->hw.period_left, resource_info->available_credit);
+		event->pmu->start(event, PERF_EF_RELOAD);
+	}
+
 }
 
 /*
@@ -121,21 +175,30 @@ void init_archmon_timer(struct hrtimer* timer, void* timer_callback)
 int init_module(void)
 {
 	int cpu_id = 0;
+	int num_cpus = num_online_cpus();
+	int credit_per_cpu = 0;
 
 	g_archmon_info.pcpu_resources_info = alloc_percpu(struct pcpu_shared_resources_info);
+	//g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1000) ;	// maximum # of l3c misses per 1ms
+	g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1) ;	// maximum # of l3c misses per 1s
+	credit_per_cpu = g_archmon_info.total_credit / num_cpus;
+
+	printk("Credit per cpu: %d\n", credit_per_cpu);
 
 	for_each_online_cpu(cpu_id) {
 
 		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
 
-		resource_info->perf_l3c_miss_event = reprogram_counter(cpu_id, PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, false, true, 1000, (perf_overflow_handler_t)perf_l3c_miss_overflow);
+		resource_info->l3c_miss_sample_period = credit_per_cpu;
+		resource_info->credit = credit_per_cpu;
+		resource_info->available_credit = credit_per_cpu;
+		resource_info->throttled = false;
+		resource_info->perf_l3c_miss_event = reprogram_counter(cpu_id, PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, false, true, resource_info->l3c_miss_sample_period, (perf_overflow_handler_t)perf_l3c_miss_overflow);
 
 		if ( NULL == resource_info->perf_l3c_miss_event ) {
 			printk("[%d] cannot initialize PMUs\n", cpu_id);
 			break;
 		}
-		
-		printk("[%d] core\n", cpu_id);
 	}
 	
 	g_archmon_info.period = ktime_set(0, TIMER_INTERVAL);
