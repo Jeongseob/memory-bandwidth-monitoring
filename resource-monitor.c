@@ -10,6 +10,8 @@
 #include <linux/hrtimer.h> 
 #include <linux/ktime.h> 
 
+#define TIMER_INTERVAL	1000000000	// 1s
+
 struct pcpu_shared_resources_info {
 	
 	int bw_reserve;
@@ -19,10 +21,16 @@ struct pcpu_shared_resources_info {
 	int cache_limit;
 
 	struct perf_event* perf_l3c_miss_event;
-
 };
 
-static struct pcpu_shared_resources_info* __percpu pcpu_resources_info;
+struct archmon_info {
+
+	struct pcpu_shared_resources_info* __percpu pcpu_resources_info;
+	struct hrtimer period_timer;
+	ktime_t	period;
+};
+
+static struct archmon_info g_archmon_info;
 
 /*
  *	L3 cache miss overflow callback
@@ -68,9 +76,44 @@ static void stop_counter(struct perf_event* event)
 	}
 }
 
+
 /*
- *
+ * Do something
  */
+static void do_archmon_period_timer()
+{
+	printk("[%d]Timer invoked!\n", smp_processor_id());
+}
+
+/*
+ *	Periodic timer
+ */
+enum hrtimer_restart archmon_period_timer(struct hrtimer* timer)
+{
+	int overrun;
+	ktime_t now;
+
+	for (;;) {
+		now = hrtimer_cb_get_time(timer);
+		overrun = hrtimer_forward(timer, now, g_archmon_info.period);
+		
+		if (!overrun)
+			break;
+		
+		do_archmon_period_timer();
+	}
+
+	return HRTIMER_RESTART;
+}
+
+
+void init_archmon_timer(struct hrtimer* timer, void* timer_callback)
+{
+	ktime_t interval = ktime_set(0, TIMER_INTERVAL);
+	hrtimer_init(timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	timer->function = timer_callback;	
+	hrtimer_start(timer, interval, HRTIMER_MODE_REL);
+}
 
 /*
  * Entry point
@@ -79,24 +122,26 @@ int init_module(void)
 {
 	int cpu_id = 0;
 
-	printk(KERN_INFO "Init architectural shared resources monitoring module\n");
-	pcpu_resources_info = alloc_percpu(struct pcpu_shared_resources_info);
+	g_archmon_info.pcpu_resources_info = alloc_percpu(struct pcpu_shared_resources_info);
 
 	for_each_online_cpu(cpu_id) {
 
-		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(pcpu_resources_info, cpu_id);
+		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
 
 		resource_info->perf_l3c_miss_event = reprogram_counter(cpu_id, PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, false, true, 1000, (perf_overflow_handler_t)perf_l3c_miss_overflow);
 
-		/*
 		if ( NULL == resource_info->perf_l3c_miss_event ) {
 			printk("[%d] cannot initialize PMUs\n", cpu_id);
 			break;
 		}
-		*/
 		
 		printk("[%d] core\n", cpu_id);
 	}
+	
+	g_archmon_info.period = ktime_set(0, TIMER_INTERVAL);
+	init_archmon_timer(&g_archmon_info.period_timer, archmon_period_timer);
+	
+	printk(KERN_INFO "Init architectural shared resources monitoring module\n");
 
 	return 0;    // Non-zero return means that the module couldn't be loaded.
 }
@@ -107,9 +152,12 @@ void cleanup_module(void)
 
 	for_each_online_cpu(i) {
 
-		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(pcpu_resources_info, i);
+		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, i);
 		stop_counter(resource_info->perf_l3c_miss_event);
 	}
+
+	hrtimer_cancel(&g_archmon_info.period_timer);
+
 	printk(KERN_INFO "Cleaning architectural shared resources monitorting module\n");
 }
 
