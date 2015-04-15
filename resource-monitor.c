@@ -80,7 +80,7 @@ static void stop_counter(struct perf_event* event)
 /*
  * Do something
  */
-static void do_archmon_period_timer()
+static void do_archmon_period_timer(void)
 {
 	printk("[%d]Timer invoked!\n", smp_processor_id());
 }
