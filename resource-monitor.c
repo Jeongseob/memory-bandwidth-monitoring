@@ -10,6 +10,7 @@
 #include <linux/hrtimer.h> 
 #include <linux/ktime.h> 
 
+#define AHN_DEBUG 1
 #define TIMER_INTERVAL	1000000000	// 1s
 #define DDR3_1600_MAX_BANDWIDTH	12800*1024*1024	// B/s
 
@@ -51,7 +52,6 @@ static void perf_l3c_miss_overflow(struct perf_event* event, struct perf_sample_
 	u64 used_credit = local64_read(&event->count);
 
 	if ( used_credit < resource_info->credit ) {
-		// Error
 		return;
 	}
 	
@@ -60,16 +60,18 @@ static void perf_l3c_miss_overflow(struct perf_event* event, struct perf_sample_
 	
 	/* need to throttle process running on the cpu */
 	if ( resource_info->throttled == true ) {
-		// Error
-		printk("[%d] Error the processor is still throttled down!\n", smp_processor_id());
+#ifdef AHN_DEBUG
+		printk(KERN_ERR "[%d] a process %d is still throttled down!\n", smp_processor_id(), current->pid);
+#endif
 		return;
 	}
 
 	resource_info->throttled_task = current;
 	resource_info->throttled = true;
 	kill_pid(task_pid(current), SIGSTOP, 1);
-	printk("[%d] %d need to be throttled down \n", smp_processor_id(), current->pid);
-
+#ifdef AHN_DEBUG
+	printk("[%d] a process %d needs to be throttled down \n", smp_processor_id(), current->pid);
+#endif
 }
 
 /*
@@ -92,7 +94,7 @@ static struct perf_event* reprogram_counter(int cpu, u32 type, unsigned config,
 	event = perf_event_create_kernel_counter(&attr, cpu, NULL, callback, NULL);
 
 	if ( IS_ERR(event) ) {
-		printk("pmu event creation failed %ld\n", PTR_ERR(event));
+		printk(KERN_ERR "pmu event creation failed %ld\n", PTR_ERR(event));
 		return NULL;
 	}
 	
@@ -116,7 +118,9 @@ static void stop_counter(struct perf_event* event)
 static void do_archmon_period_timer(void)
 {
 	int cpu_id = 0;
-	printk("[%d]Timer invoked!\n", smp_processor_id());
+#ifdef AHN_DEBUG
+	printk("[%d] timer invoked!\n", smp_processor_id());
+#endif
 
 	for_each_online_cpu(cpu_id) {
 		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
@@ -131,7 +135,9 @@ static void do_archmon_period_timer(void)
 		/* If there are throttled threads, then need to unlock */
 		if ( resource_info->throttled ) {
 			kill_pid(task_pid(resource_info->throttled_task), SIGCONT, 1);
-			printk("[%d] %d need to be throttled up \n", cpu_id, resource_info->throttled_task->pid);
+#ifdef AHN_DEBUG
+			printk("[%d] a process %d needs to be throttled up \n", cpu_id, resource_info->throttled_task->pid);
+#endif
 			resource_info->throttled = false;
 		}
 	
@@ -192,7 +198,7 @@ int init_archmon_percpu(struct pcpu_shared_resources_info* resource_info, int cp
 	resource_info->perf_l3c_miss_event = reprogram_counter(cpu_id, PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, false, true, resource_info->l3c_miss_sample_period, (perf_overflow_handler_t)perf_l3c_miss_overflow);
 	
 	if ( NULL == resource_info->perf_l3c_miss_event ) {
-		printk("[%d] cannot initialize PMUs\n", cpu_id);
+		printk(KERN_ERR "[%d] cannot initialize PMUs\n", cpu_id);
 		return -1;
 	}
 
@@ -212,13 +218,13 @@ int init_module(void)
 	for_each_online_cpu(cpu_id) {
 		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
 		if ( init_archmon_percpu(resource_info, cpu_id) == -1 ) {
-			break;
+			return -1;
 		}
 	}
 	
 	init_archmon_timer(&g_archmon_info.period_timer, archmon_period_timer);
 	
-	printk(KERN_INFO "Init architectural shared resources monitoring module\n");
+	printk(KERN_INFO "Archmon is loaded\n");
 
 	return 0;    // Non-zero return means that the module couldn't be loaded.
 }
@@ -235,7 +241,7 @@ void cleanup_module(void)
 
 	hrtimer_cancel(&g_archmon_info.period_timer);
 
-	printk(KERN_INFO "Cleaning architectural shared resources monitorting module\n");
+	printk(KERN_INFO "Archmon is unloaded\n");
 }
 
 MODULE_LICENSE("GPL");
