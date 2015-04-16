@@ -23,9 +23,11 @@ struct pcpu_shared_resources_info {
 
 	struct perf_event* perf_l3c_miss_event;
 	int l3c_miss_sample_period; 
-	u64 credit;
-	u64 available_credit;
 
+	u64 credit;
+	u64 credit_per_period;
+
+	struct task_struct* throttled_task;
 	bool throttled;
 };
 
@@ -48,22 +50,24 @@ static void perf_l3c_miss_overflow(struct perf_event* event, struct perf_sample_
 	struct pcpu_shared_resources_info* resource_info = this_cpu_ptr(g_archmon_info.pcpu_resources_info);
 	u64 used_credit = local64_read(&event->count);
 
-	if ( used_credit < resource_info->available_credit ) {
+	if ( used_credit < resource_info->credit ) {
 		// Error
 		return;
 	}
 	
 	/* End up its credit! */
-	resource_info->available_credit = 0;
+	resource_info->credit = 0;
 	
 	/* need to throttle process running on the cpu */
 	if ( resource_info->throttled == true ) {
 		// Error
-		printk("[%d] Error the processor is still throttled!\n", smp_processor_id());
+		printk("[%d] Error the processor is still throttled down!\n", smp_processor_id());
 		return;
 	}
+
+	resource_info->throttled_task = current;
 	resource_info->throttled = true;
-	printk("[%d] need to be throttled \n", smp_processor_id());
+	printk("[%d] %d need to be throttled down \n", smp_processor_id(), current->pid);
 
 }
 
@@ -121,11 +125,11 @@ static void do_archmon_period_timer(void)
 		event->pmu->stop(event, PERF_EF_UPDATE);
 
 		/* Reset the credit */
-		resource_info->available_credit = resource_info->credit;
+		resource_info->credit = resource_info->credit_per_period;
 
 		/* If there are throttled threads, then need to unlock */
 		if ( resource_info->throttled ) {
-			printk("[%d] need to be unthrottled \n", cpu_id);
+			printk("[%d] %d need to be throttled up \n", cpu_id, resource_info->throttled_task->pid);
 			resource_info->throttled = false;
 		}
 	
@@ -133,7 +137,7 @@ static void do_archmon_period_timer(void)
 		 * Reconfiguring the period to reflect new credit on the sampling period 
 		 * and restart the perf event
 		 */
-		local64_set(&event->hw.period_left, resource_info->available_credit);
+		local64_set(&event->hw.period_left, resource_info->credit);
 		event->pmu->start(event, PERF_EF_RELOAD);
 	}
 
@@ -169,39 +173,47 @@ void init_archmon_timer(struct hrtimer* timer, void* timer_callback)
 	hrtimer_start(timer, interval, HRTIMER_MODE_REL);
 }
 
+int init_archmon_percpu(struct pcpu_shared_resources_info* resource_info, int cpu_id)
+{
+	int credit_per_cpu = 0;
+
+	//g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1000) ;	// maximum # of l3c misses per 1ms
+	g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1) ;	// maximum # of l3c misses per 1s
+	credit_per_cpu = g_archmon_info.total_credit / num_online_cpus();
+
+	resource_info->l3c_miss_sample_period = credit_per_cpu;
+	resource_info->credit = credit_per_cpu;
+	resource_info->credit_per_period = credit_per_cpu;
+	resource_info->throttled_task = NULL;
+	resource_info->throttled = false;
+		
+	resource_info->perf_l3c_miss_event = reprogram_counter(cpu_id, PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, false, true, resource_info->l3c_miss_sample_period, (perf_overflow_handler_t)perf_l3c_miss_overflow);
+	
+	if ( NULL == resource_info->perf_l3c_miss_event ) {
+		printk("[%d] cannot initialize PMUs\n", cpu_id);
+		return -1;
+	}
+
+	return 0;
+}
+
 /*
  * Entry point
  */ 
 int init_module(void)
 {
 	int cpu_id = 0;
-	int num_cpus = num_online_cpus();
-	int credit_per_cpu = 0;
 
 	g_archmon_info.pcpu_resources_info = alloc_percpu(struct pcpu_shared_resources_info);
-	//g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1000) ;	// maximum # of l3c misses per 1ms
-	g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1) ;	// maximum # of l3c misses per 1s
-	credit_per_cpu = g_archmon_info.total_credit / num_cpus;
-
-	printk("Credit per cpu: %d\n", credit_per_cpu);
+	g_archmon_info.period = ktime_set(0, TIMER_INTERVAL);
 
 	for_each_online_cpu(cpu_id) {
-
 		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
-
-		resource_info->l3c_miss_sample_period = credit_per_cpu;
-		resource_info->credit = credit_per_cpu;
-		resource_info->available_credit = credit_per_cpu;
-		resource_info->throttled = false;
-		resource_info->perf_l3c_miss_event = reprogram_counter(cpu_id, PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, false, true, resource_info->l3c_miss_sample_period, (perf_overflow_handler_t)perf_l3c_miss_overflow);
-
-		if ( NULL == resource_info->perf_l3c_miss_event ) {
-			printk("[%d] cannot initialize PMUs\n", cpu_id);
+		if ( init_archmon_percpu(resource_info, cpu_id) == -1 ) {
 			break;
 		}
 	}
 	
-	g_archmon_info.period = ktime_set(0, TIMER_INTERVAL);
 	init_archmon_timer(&g_archmon_info.period_timer, archmon_period_timer);
 	
 	printk(KERN_INFO "Init architectural shared resources monitoring module\n");
