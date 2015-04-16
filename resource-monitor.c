@@ -67,6 +67,7 @@ static void perf_l3c_miss_overflow(struct perf_event* event, struct perf_sample_
 
 	resource_info->throttled_task = current;
 	resource_info->throttled = true;
+	kill_pid(task_pid(current), SIGSTOP, 1);
 	printk("[%d] %d need to be throttled down \n", smp_processor_id(), current->pid);
 
 }
@@ -129,6 +130,7 @@ static void do_archmon_period_timer(void)
 
 		/* If there are throttled threads, then need to unlock */
 		if ( resource_info->throttled ) {
+			kill_pid(task_pid(resource_info->throttled_task), SIGCONT, 1);
 			printk("[%d] %d need to be throttled up \n", cpu_id, resource_info->throttled_task->pid);
 			resource_info->throttled = false;
 		}
