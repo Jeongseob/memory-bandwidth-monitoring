@@ -10,8 +10,8 @@
 #include <linux/hrtimer.h> 
 #include <linux/ktime.h> 
 
-#define AHN_DEBUG 1
-#define TIMER_INTERVAL	1000000000	// 1s
+#define AHN_DEBUG 0
+#define TIMER_INTERVAL	1000000		// 1ms:1000000, 1s: 1000000000
 #define DDR3_1600_MAX_BANDWIDTH	12800*1024*1024	// B/s
 
 struct pcpu_shared_resources_info {
@@ -30,12 +30,13 @@ struct pcpu_shared_resources_info {
 
 	struct task_struct* throttled_task;
 	bool throttled;
+	
+	struct hrtimer period_timer;
 };
 
 struct archmon_info {
 
 	struct pcpu_shared_resources_info* __percpu pcpu_resources_info;
-	struct hrtimer period_timer;
 	ktime_t	period;
 
 	int total_credit;
@@ -60,7 +61,7 @@ static void perf_l3c_miss_overflow(struct perf_event* event, struct perf_sample_
 	
 	/* need to throttle process running on the cpu */
 	if ( resource_info->throttled == true ) {
-#ifdef AHN_DEBUG
+#if AHN_DEBUG
 		printk(KERN_ERR "[%d] a process %d is still throttled down!\n", smp_processor_id(), current->pid);
 #endif
 		return;
@@ -69,7 +70,7 @@ static void perf_l3c_miss_overflow(struct perf_event* event, struct perf_sample_
 	resource_info->throttled_task = current;
 	resource_info->throttled = true;
 	kill_pid(task_pid(current), SIGSTOP, 1);
-#ifdef AHN_DEBUG
+#if AHN_DEBUG
 	printk("[%d] a process %d needs to be throttled down \n", smp_processor_id(), current->pid);
 #endif
 }
@@ -117,38 +118,40 @@ static void stop_counter(struct perf_event* event)
  */
 static void do_archmon_period_timer(void)
 {
-	int cpu_id = 0;
-#ifdef AHN_DEBUG
+	int cpu_id;
+	struct pcpu_shared_resources_info* resource_info;
+	struct perf_event* event;
+
+	cpu_id = smp_processor_id();
+
+#if AHN_DEBUG
 	printk("[%d] timer invoked!\n", smp_processor_id());
 #endif
 
-	for_each_online_cpu(cpu_id) {
-		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
-		struct perf_event* event = resource_info->perf_l3c_miss_event;
-		
-		/* Stop the perf event */
-		event->pmu->stop(event, PERF_EF_UPDATE);
+	resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
+	event = resource_info->perf_l3c_miss_event;
 
-		/* Reset the credit */
-		resource_info->credit = resource_info->credit_per_period;
+	/* Stop the perf event */
+	event->pmu->stop(event, PERF_EF_UPDATE);
 
-		/* If there are throttled threads, then need to unlock */
-		if ( resource_info->throttled ) {
-			kill_pid(task_pid(resource_info->throttled_task), SIGCONT, 1);
-#ifdef AHN_DEBUG
-			printk("[%d] a process %d needs to be throttled up \n", cpu_id, resource_info->throttled_task->pid);
+	/* Reset the credit */
+	resource_info->credit = resource_info->credit_per_period;
+
+	/* If there are throttled threads, then need to unlock */
+	if ( resource_info->throttled ) {
+		kill_pid(task_pid(resource_info->throttled_task), SIGCONT, 1);
+#if AHN_DEBUG
+		printk("[%d] a process %d needs to be throttled up \n", cpu_id, resource_info->throttled_task->pid);
 #endif
-			resource_info->throttled = false;
-		}
-	
-		/* 
-		 * Reconfiguring the period to reflect new credit on the sampling period 
-		 * and restart the perf event
-		 */
-		local64_set(&event->hw.period_left, resource_info->credit);
-		event->pmu->start(event, PERF_EF_RELOAD);
+		resource_info->throttled = false;
 	}
 
+	/* 
+	 * Reconfiguring the period to reflect new credit on the sampling period 
+	 * and restart the perf event
+	 */
+	local64_set(&event->hw.period_left, resource_info->credit);
+	event->pmu->start(event, PERF_EF_RELOAD);
 }
 
 /*
@@ -173,20 +176,29 @@ enum hrtimer_restart archmon_period_timer(struct hrtimer* timer)
 }
 
 
-void init_archmon_timer(struct hrtimer* timer, void* timer_callback)
+void init_archmon_timer(void* timer_callback)
 {
+	struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, smp_processor_id());
+
 	ktime_t interval = ktime_set(0, TIMER_INTERVAL);
-	hrtimer_init(timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-	timer->function = timer_callback;	
-	hrtimer_start(timer, interval, HRTIMER_MODE_REL);
+	hrtimer_init(&resource_info->period_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED);
+	resource_info->period_timer.function = timer_callback;	
+	hrtimer_start(&resource_info->period_timer, interval, HRTIMER_MODE_REL_PINNED);
+}
+
+void cleanup_archmon_timer(void* unused)
+{
+	struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, smp_processor_id());
+
+	hrtimer_cancel(&resource_info->period_timer);
 }
 
 int init_archmon_percpu(struct pcpu_shared_resources_info* resource_info, int cpu_id)
 {
 	int credit_per_cpu = 0;
 
-	//g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1000) ;	// maximum # of l3c misses per 1ms
-	g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1) ;	// maximum # of l3c misses per 1s
+	g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1000) ;	// maximum # of l3c misses per 1ms
+	// g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1) ;	// maximum # of l3c misses per 1s
 	credit_per_cpu = g_archmon_info.total_credit / num_online_cpus();
 
 	resource_info->l3c_miss_sample_period = credit_per_cpu;
@@ -222,7 +234,7 @@ int init_module(void)
 		}
 	}
 	
-	init_archmon_timer(&g_archmon_info.period_timer, archmon_period_timer);
+	on_each_cpu(init_archmon_timer, archmon_period_timer, 1);
 	
 	printk(KERN_INFO "Archmon is loaded\n");
 
@@ -239,7 +251,7 @@ void cleanup_module(void)
 		stop_counter(resource_info->perf_l3c_miss_event);
 	}
 
-	hrtimer_cancel(&g_archmon_info.period_timer);
+	on_each_cpu(cleanup_archmon_timer, NULL, 1);
 
 	printk(KERN_INFO "Archmon is unloaded\n");
 }
