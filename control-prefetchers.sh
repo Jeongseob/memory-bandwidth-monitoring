@@ -14,11 +14,21 @@ usage()
 	echo "usage: $0 -d or -e"
 	echo "-d: disable prfetchers"
 	echo "-e: enable preferchers" 
+	exit 1
 }
+
 
 if [ $# -ne 1 ]
 then
 	usage
+fi
+
+# check msr module
+lsmod | grep msr >& /dev/null
+if [ $? -ne 0 ]
+then
+	echo "modprobe msr"
+	modprobe msr
 fi
 
 # Ref: Intel Software Developer's Manual
@@ -40,4 +50,3 @@ while getopts :hde opt; do
 			;;
 	esac
 done
-
