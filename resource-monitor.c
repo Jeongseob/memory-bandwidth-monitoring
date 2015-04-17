@@ -11,8 +11,8 @@
 #include <linux/ktime.h> 
 
 #define AHN_DEBUG 0
-#define TIMER_INTERVAL	1000000		// 1ms:1000000, 1s: 1000000000
-#define DDR3_1600_MAX_BANDWIDTH	12800*1024*1024	// B/s
+#define TIMER_INTERVAL_US	10000			// 10ms
+#define MAX_BANDWIDTH	2100*1024*1024	// B/s
 
 struct pcpu_shared_resources_info {
 	
@@ -32,13 +32,12 @@ struct pcpu_shared_resources_info {
 	bool throttled;
 	
 	struct hrtimer period_timer;
+	ktime_t	period;
 };
 
 struct archmon_info {
 
 	struct pcpu_shared_resources_info* __percpu pcpu_resources_info;
-	ktime_t	period;
-
 	int total_credit;
 };
 
@@ -161,10 +160,11 @@ enum hrtimer_restart archmon_period_timer(struct hrtimer* timer)
 {
 	int overrun;
 	ktime_t now;
+	struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, smp_processor_id());
 
 	for (;;) {
 		now = hrtimer_cb_get_time(timer);
-		overrun = hrtimer_forward(timer, now, g_archmon_info.period);
+		overrun = hrtimer_forward(timer, now, resource_info->period);
 		
 		if (!overrun)
 			break;
@@ -180,7 +180,7 @@ void init_archmon_timer(void* timer_callback)
 {
 	struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, smp_processor_id());
 
-	ktime_t interval = ktime_set(0, TIMER_INTERVAL);
+	ktime_t interval = resource_info->period;
 	hrtimer_init(&resource_info->period_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED);
 	resource_info->period_timer.function = timer_callback;	
 	hrtimer_start(&resource_info->period_timer, interval, HRTIMER_MODE_REL_PINNED);
@@ -197,10 +197,10 @@ int init_archmon_percpu(struct pcpu_shared_resources_info* resource_info, int cp
 {
 	int credit_per_cpu = 0;
 
-	g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1000) ;	// maximum # of l3c misses per 1ms
-	// g_archmon_info.total_credit = div64_u64( (u64)DDR3_1600_MAX_BANDWIDTH, 64 * 1) ;	// maximum # of l3c misses per 1s
 	credit_per_cpu = g_archmon_info.total_credit / num_online_cpus();
+	printk(KERN_INFO "[%d] credit: %d\n", cpu_id, credit_per_cpu);
 
+	resource_info->period = ktime_set(0, TIMER_INTERVAL_US * 1000);	//ns
 	resource_info->l3c_miss_sample_period = credit_per_cpu;
 	resource_info->credit = credit_per_cpu;
 	resource_info->credit_per_period = credit_per_cpu;
@@ -225,7 +225,7 @@ int init_module(void)
 	int cpu_id = 0;
 
 	g_archmon_info.pcpu_resources_info = alloc_percpu(struct pcpu_shared_resources_info);
-	g_archmon_info.period = ktime_set(0, TIMER_INTERVAL);
+	g_archmon_info.total_credit = div64_u64( (u64)MAX_BANDWIDTH, 64 * (1000000 / TIMER_INTERVAL_US)) ;	// maximum # of l3c misses per 1s
 
 	for_each_online_cpu(cpu_id) {
 		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
