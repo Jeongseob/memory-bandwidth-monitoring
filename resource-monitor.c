@@ -12,7 +12,8 @@
 
 #define AHN_DEBUG 0
 #define TIMER_INTERVAL_US	10000			// 10ms
-#define MAX_BANDWIDTH	2100*1024*1024	// B/s
+#define MAX_BANDWIDTH	21000*1024*1024	// B/s
+#define OFFCORE_REQUESTS_ALL_DATA_RD	0x08b0
 
 struct pcpu_shared_resources_info {
 	
