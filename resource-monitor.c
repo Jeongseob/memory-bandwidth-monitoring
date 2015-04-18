@@ -208,7 +208,7 @@ int init_archmon_percpu(struct pcpu_shared_resources_info* resource_info, int cp
 	resource_info->throttled_task = NULL;
 	resource_info->throttled = false;
 		
-	resource_info->perf_l3c_miss_event = reprogram_counter(cpu_id, PERF_TYPE_RAW, OFFCORE_REQUESTS_ALL_DATA_RD, false, true, resource_info->l3c_miss_sample_period, (perf_overflow_handler_t)perf_l3c_miss_overflow);
+	resource_info->perf_l3c_miss_event = reprogram_counter(cpu_id, PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES, false, true, resource_info->l3c_miss_sample_period, (perf_overflow_handler_t)perf_l3c_miss_overflow);
 	
 	if ( NULL == resource_info->perf_l3c_miss_event ) {
 		printk(KERN_ERR "[%d] cannot initialize PMUs\n", cpu_id);
