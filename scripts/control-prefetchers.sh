@@ -31,6 +31,9 @@ then
 	modprobe msr
 fi
 
+num_cpus=`grep ^processor /proc/cpuinfo | sort -u | wc -l`
+echo "$num_cpus"
+
 # Ref: Intel Software Developer's Manual
 # https://software.intel.com/en-us/articles/disclosure-of-hw-prefetcher-control-on-some-intel-processors
 #
@@ -43,10 +46,16 @@ while getopts :hde opt; do
 		h) usage
 			;;
 		e) echo "Enable prefetchers"
-			wrmsr -a 0x1a4 0x0
+			for (( i=0; i<num_cpus; i++ ))
+			do
+				wrmsr -p $i 0x1a4 0x0
+			done
 			;;
 		d) echo "Disable prefetchers" 
-			wrmsr -a 0x1a4 0xf
+			for (( i=0; i<num_cpus; i++ ))
+			do
+				wrmsr -p $i 0x1a4 0xf
+			done
 			;;
 	esac
 done
