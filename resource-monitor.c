@@ -11,9 +11,8 @@
 #include <linux/ktime.h> 
 
 #define AHN_DEBUG 0
-#define TIMER_INTERVAL_US	10000			// 10ms
-#define MAX_BANDWIDTH	21000*1024*1024	// B/s
-#define OFFCORE_REQUESTS_ALL_DATA_RD	0x08b0
+#define TIMER_INTERVAL_US	1000	// 1ms
+#define MAX_BANDWIDTH	70000		// MB/s
 
 struct pcpu_shared_resources_info {
 	
@@ -226,7 +225,7 @@ int init_module(void)
 	int cpu_id = 0;
 
 	g_archmon_info.pcpu_resources_info = alloc_percpu(struct pcpu_shared_resources_info);
-	g_archmon_info.total_credit = div64_u64( (u64)MAX_BANDWIDTH, 64 * (1000000 / TIMER_INTERVAL_US)) ;	// maximum # of l3c misses per 1s
+	g_archmon_info.total_credit = MAX_BANDWIDTH;
 
 	for_each_online_cpu(cpu_id) {
 		struct pcpu_shared_resources_info* resource_info = per_cpu_ptr(g_archmon_info.pcpu_resources_info, cpu_id);
