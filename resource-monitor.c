@@ -11,8 +11,9 @@
 #include <linux/ktime.h> 
 
 #define AHN_DEBUG 0
-#define TIMER_INTERVAL_US	1000	// 1ms
-#define MAX_BANDWIDTH	70000		// MB/s
+#define TIMER_INTERVAL_US	100000	
+#define MAX_BANDWIDTH		8000000		
+
 
 struct pcpu_shared_resources_info {
 	
